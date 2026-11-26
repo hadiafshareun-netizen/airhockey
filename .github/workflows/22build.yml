@@ -438,7 +438,7 @@ jobs:
            if(st.ph===0&&role==='guest'){ctx.font='bold 26px system-ui';ctx.strokeText('در انتظار میزبان...',W/2,H/2);ctx.fillText('در انتظار میزبان...',W/2,H/2)}
            if(st.ph===1&&role!=='none'){ctx.font='bold 48px system-ui';var tx=st.cd>1.5?'ست '+st.sn:st.cd>1?'آماده؟':'برو!';ctx.strokeText(tx,W/2,H/2);ctx.fillText(tx,W/2,H/2)}
            if(st.ph===3&&!over){over=true;var won=mS>oS;play(won?4:5);saveMatch();
-            $('res').textContent=won?'بردی!':'باختی';
+            $('res').textContent=won?'سشدن آغزنا!':'سشدن';
             $('det').textContent='ست‌ها '+mS+' - '+oS+' ('+setsList.map(function(s){return g?s[1]+'-'+s[0]:s[0]+'-'+s[1]}).join(' ، ')+')';
             updRinfo();$('ov2').classList.remove('hide')}
            else if(st.ph!==3&&over){over=false;myReady=false;oppReady=false;$('ov2').classList.add('hide')}}
