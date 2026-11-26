@@ -1,0 +1,338 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Create project files
+        run: |
+          mkdir -p proj && cd proj
+          cat > settings.gradle.kts <<'EOF_FILE'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name = "AirHockey"
+          include(":app")
+          EOF_FILE
+          cat > build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+          cat > gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          EOF_FILE
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.airhockey"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.airhockey"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("com.google.android.gms:play-services-nearby:19.3.0")
+          }
+          EOF_FILE
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="30" />
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="31" />
+              <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" android:minSdkVersion="31" />
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" android:minSdkVersion="31" />
+              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:minSdkVersion="31" />
+              <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" android:minSdkVersion="32" />
+              <application
+                  android:allowBackup="false"
+                  android:label="Air Hockey"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p app/src/main/java/com/example/airhockey
+          cat > app/src/main/java/com/example/airhockey/MainActivity.kt <<'EOF_FILE'
+          package com.example.airhockey
+
+          import android.Manifest
+          import android.annotation.SuppressLint
+          import android.app.Activity
+          import android.content.pm.PackageManager
+          import android.os.Build
+          import android.os.Bundle
+          import android.view.WindowManager
+          import android.webkit.JavascriptInterface
+          import android.webkit.WebView
+          import com.google.android.gms.nearby.Nearby
+          import com.google.android.gms.nearby.connection.*
+          import org.json.JSONObject
+
+          class MainActivity : Activity() {
+              private lateinit var web: WebView
+              private lateinit var client: ConnectionsClient
+              private var peer: String? = null
+              private var pending: String? = null
+              private val sid = "com.example.airhockey"
+              private val strategy = Strategy.P2P_POINT_TO_POINT
+
+              @SuppressLint("SetJavaScriptEnabled")
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  client = Nearby.getConnectionsClient(this)
+                  web = WebView(this)
+                  web.settings.javaScriptEnabled = true
+                  web.settings.domStorageEnabled = true
+                  web.settings.mediaPlaybackRequiresUserGesture = false
+                  web.addJavascriptInterface(Bridge(), "Android")
+                  web.loadUrl("file:///android_asset/index.html")
+                  setContentView(web)
+              }
+
+              private fun js(type: String, data: String = "") {
+                  runOnUiThread {
+                      web.evaluateJavascript("window.onNative(${JSONObject.quote(type)},${JSONObject.quote(data)})", null)
+                  }
+              }
+
+              private fun perms(): Array<String> = when {
+                  Build.VERSION.SDK_INT >= 33 -> arrayOf(
+                      Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT,
+                      Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.NEARBY_WIFI_DEVICES)
+                  Build.VERSION.SDK_INT >= 31 -> arrayOf(
+                      Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT,
+                      Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.ACCESS_FINE_LOCATION)
+                  else -> arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+              }
+
+              private fun withPerms(action: String) {
+                  val missing = perms().filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+                  if (missing.isEmpty()) go(action) else { pending = action; requestPermissions(missing.toTypedArray(), 1) }
+              }
+
+              override fun onRequestPermissionsResult(code: Int, p: Array<out String>, r: IntArray) {
+                  super.onRequestPermissionsResult(code, p, r)
+                  val a = pending; pending = null
+                  if (a != null && r.isNotEmpty() && r.all { it == PackageManager.PERMISSION_GRANTED }) go(a)
+                  else js("failed", "permission denied")
+              }
+
+              private fun go(action: String) {
+                  if (action == "host") {
+                      client.startAdvertising("host", sid, life, AdvertisingOptions.Builder().setStrategy(strategy).build())
+                          .addOnSuccessListener { js("status", "advertising") }
+                          .addOnFailureListener { js("failed", it.message ?: "advertise") }
+                  } else {
+                      client.startDiscovery(sid, disc, DiscoveryOptions.Builder().setStrategy(strategy).build())
+                          .addOnSuccessListener { js("status", "discovering") }
+                          .addOnFailureListener { js("failed", it.message ?: "discover") }
+                  }
+              }
+
+              private val payload = object : PayloadCallback() {
+                  override fun onPayloadReceived(id: String, p: Payload) {
+                      p.asBytes()?.let { js("msg", String(it, Charsets.UTF_8)) }
+                  }
+                  override fun onPayloadTransferUpdate(id: String, u: PayloadTransferUpdate) {}
+              }
+
+              private val life = object : ConnectionLifecycleCallback() {
+                  override fun onConnectionInitiated(id: String, info: ConnectionInfo) {
+                      client.acceptConnection(id, payload)
+                  }
+                  override fun onConnectionResult(id: String, res: ConnectionResolution) {
+                      if (res.status.isSuccess) {
+                          peer = id
+                          client.stopAdvertising(); client.stopDiscovery()
+                          js("connected")
+                      } else js("failed", "connection rejected")
+                  }
+                  override fun onDisconnected(id: String) { peer = null; js("disconnected") }
+              }
+
+              private val disc = object : EndpointDiscoveryCallback() {
+                  override fun onEndpointFound(id: String, info: DiscoveredEndpointInfo) {
+                      client.requestConnection("guest", id, life)
+                  }
+                  override fun onEndpointLost(id: String) {}
+              }
+
+              inner class Bridge {
+                  @JavascriptInterface fun host() { runOnUiThread { withPerms("host") } }
+                  @JavascriptInterface fun join() { runOnUiThread { withPerms("join") } }
+                  @JavascriptInterface fun send(s: String) {
+                      peer?.let { client.sendPayload(it, Payload.fromBytes(s.toByteArray(Charsets.UTF_8))) }
+                  }
+                  @JavascriptInterface fun stop() {
+                      client.stopAllEndpoints(); client.stopAdvertising(); client.stopDiscovery(); peer = null
+                  }
+              }
+
+              override fun onDestroy() { client.stopAllEndpoints(); super.onDestroy() }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/index.html <<'EOF_FILE'
+          <!DOCTYPE html>
+          <html lang="fa" dir="rtl"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+          <title>Air Hockey</title>
+          <style>
+          *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none}
+          html,body{margin:0;height:100%;overflow:hidden;background:#0b1220;color:#fff;font-family:system-ui,sans-serif}
+          canvas{position:fixed;inset:0;width:100%;height:100%;touch-action:none}
+          .ov{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:rgba(5,10,20,.88);text-align:center;padding:20px}
+          .ov h1{margin:0;font-size:30px}.ov p{margin:0;font-size:15px;line-height:1.8;max-width:320px;color:#b9c6dd}
+          button{border:0;border-radius:16px;background:#2f7de1;color:#fff;font-size:20px;padding:13px 28px;min-width:230px}
+          button.g{background:#2c3a55}.hide{display:none!important}
+          </style></head><body>
+          <canvas id="c"></canvas>
+          <div class="ov" id="menu"><h1>Air Hockey</h1>
+          <p id="stat">دو گوشی کنار هم: یکی «ساخت بازی» و دیگری «پیوستن» رو بزنه.</p>
+          <button id="bh">ساخت بازی (میزبان)</button><button id="bj">پیوستن</button><button class="g" id="bs">تمرین تک‌نفره</button><button class="g" id="bt">تست صدا</button></div>
+          <div class="ov hide" id="ov2"><h1 id="res"></h1><button id="again">دوباره</button><button class="g" id="home">منو</button></div>
+          <script>
+          var LW=400,LH=800,PR=18,PD=34,GOAL=170,WIN=7,MAXS=1300;
+          var role='none',st={px:200,py:400,vx:0,vy:0,hx:200,hy:700,gx:200,gy:100,hs:0,gs:0,ph:0,cd:0};
+          var mine={x:200,y:700},gt={x:200,y:100},dp={x:200,y:400},dh={x:200,y:700},lastMsg=0,lastSend=0,last=0,over=false;
+          var $=function(i){return document.getElementById(i)};
+          var AC=null,ev=0,evn=0,seenEvn=0;
+          function unlock(){if(!AC){try{AC=new(window.AudioContext||window.webkitAudioContext)()}catch(e){}}if(AC&&AC.state==='suspended')AC.resume()}
+          ['pointerdown','pointerup','touchend','click'].forEach(function(n){document.addEventListener(n,unlock,true)});
+          function tone(f,d,ty,v,f2,delay){if(!AC)return;var t=AC.currentTime+(delay||0),o=AC.createOscillator(),g=AC.createGain();o.type=ty;o.frequency.setValueAtTime(f,t);if(f2)o.frequency.exponentialRampToValueAtTime(f2,t+d);g.gain.setValueAtTime(v,t);g.gain.exponentialRampToValueAtTime(.001,t+d);o.connect(g);g.connect(AC.destination);o.start(t);o.stop(t+d+.02)}
+          function play(k){if(AC&&AC.state==='suspended')AC.resume();if(k===1)tone(420,.08,'square',.12,180);else if(k===2)tone(200,.06,'triangle',.25,120);
+           else if(k===3){tone(523,.15,'sine',.3);tone(659,.15,'sine',.3,0,.12);tone(784,.3,'sine',.3,0,.24)}
+           else if(k===4){[523,659,784,1047].forEach(function(f,i){tone(f,.2,'triangle',.3,0,i*.15)})}
+           else if(k===5){[400,330,260,200].forEach(function(f,i){tone(f,.25,'sawtooth',.15,0,i*.18)})}}
+          function emit(k){ev=k;evn++;play(k)}
+          var cv=$('c'),ctx=cv.getContext('2d'),W,H,S,OX,OY,DPR;
+          function rs(){DPR=devicePixelRatio||1;W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;S=Math.min(W/LW,H/LH);OX=(W-LW*S)/2;OY=(H-LH*S)/2}
+          rs();addEventListener('resize',rs);
+          function send(s){if(window.Android)Android.send(s)}
+          function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+          function setMine(cx,cy){var x=(cx-OX)/S,y=(cy-OY)/S;if(role==='guest'){x=LW-x;y=LH-y}
+           mine.x=clamp(x,PD,LW-PD);mine.y=role==='guest'?clamp(y,PD,LH/2-PD):clamp(y,LH/2+PD,LH-PD)}
+          cv.addEventListener('pointerdown',function(e){e.preventDefault();setMine(e.clientX,e.clientY)});
+          cv.addEventListener('pointermove',function(e){e.preventDefault();setMine(e.clientX,e.clientY)});
+          function newGame(){st.hs=0;st.gs=0;st.px=LW/2;st.py=LH/2;st.vx=0;st.vy=0;st.hx=mine.x;st.hy=mine.y;st.gx=LW/2;st.gy=100;gt.x=LW/2;gt.y=100;st.ph=1;st.cd=2;over=false;$('ov2').classList.add('hide')}
+          function goal(){emit(3);st.px=LW/2;st.py=LH/2;st.vx=0;st.vy=0;if(st.hs>=WIN||st.gs>=WIN)st.ph=3;else{st.ph=1;st.cd=1.5}}
+          function hit(x,y,pvx,pvy){var dx=st.px-x,dy=st.py-y,d=Math.sqrt(dx*dx+dy*dy),m=PR+PD;
+           if(d<m&&d>0){var nx=dx/d,ny=dy/d;st.px=x+nx*m;st.py=y+ny*m;
+            var vn=(st.vx-pvx)*nx+(st.vy-pvy)*ny;
+            if(vn<0){if(vn<-60)emit(1);st.vx-=1.9*vn*nx;st.vy-=1.9*vn*ny}
+            var sp=Math.sqrt(st.vx*st.vx+st.vy*st.vy);if(sp>MAXS){st.vx*=MAXS/sp;st.vy*=MAXS/sp}}}
+          function hostUpdate(dt){
+           var ohx=st.hx,ohy=st.hy,ogx=st.gx,ogy=st.gy;st.hx=mine.x;st.hy=mine.y;
+           if(role==='solo'){var ty=st.py<LH/2?Math.max(PD,st.py-50):120;ty=clamp(ty,PD,LH/2-PD);
+            st.gx+=clamp(st.px-st.gx,-260*dt,260*dt);st.gy+=clamp(ty-st.gy,-260*dt,260*dt)}
+           else{var k=Math.min(1,dt*25);st.gx+=(gt.x-st.gx)*k;st.gy+=(gt.y-st.gy)*k}
+           if(dt<=0)return;
+           var hv={x:clamp((st.hx-ohx)/dt,-1800,1800),y:clamp((st.hy-ohy)/dt,-1800,1800)};
+           var gv={x:clamp((st.gx-ogx)/dt,-1800,1800),y:clamp((st.gy-ogy)/dt,-1800,1800)};
+           if(st.ph===1){st.cd-=dt;if(st.cd<=0)st.ph=2;return}
+           if(st.ph!==2)return;
+           var n=Math.ceil(dt/0.004),h=dt/n;
+           for(var i=0;i<n;i++){
+            st.px+=st.vx*h;st.py+=st.vy*h;var f=Math.pow(.7,h);st.vx*=f;st.vy*=f;
+            if(st.px<PR){st.px=PR;if(st.vx<-80)emit(2);st.vx=Math.abs(st.vx)*.92}
+            if(st.px>LW-PR){st.px=LW-PR;if(st.vx>80)emit(2);st.vx=-Math.abs(st.vx)*.92}
+            var ing=Math.abs(st.px-LW/2)<GOAL/2;
+            if(st.py<PR&&!ing){st.py=PR;if(st.vy<-80)emit(2);st.vy=Math.abs(st.vy)*.92}
+            if(st.py>LH-PR&&!ing){st.py=LH-PR;if(st.vy>80)emit(2);st.vy=-Math.abs(st.vy)*.92}
+            hit(st.hx,st.hy,hv.x,hv.y);hit(st.gx,st.gy,gv.x,gv.y);
+            if(st.py<-PR){st.hs++;goal();break}
+            if(st.py>LH+PR){st.gs++;goal();break}}}
+          function onMsg(m){var p=m.split('|'),a=p[1].split(',').map(Number);
+           if(p[0]==='s'){st.px=a[0];st.py=a[1];st.vx=a[2];st.vy=a[3];st.hx=a[4];st.hy=a[5];st.hs=a[6];st.gs=a[7];st.ph=a[8];st.cd=a[9]/10;if(!lastMsg)seenEvn=a[11];else if(a[11]!==seenEvn){seenEvn=a[11];play(a[10])}lastMsg=performance.now()}
+           else if(p[0]==='p'){gt.x=clamp(a[0],PD,LW-PD);gt.y=clamp(a[1],PD,LH/2-PD)}}
+          window.onNative=function(t,d){
+           if(t==='status')$('stat').textContent=d==='advertising'?'منتظر بازیکن دوم... روی گوشی دوم «پیوستن» رو بزن.':'در حال جستجوی میزبان...';
+           else if(t==='connected'){$('menu').classList.add('hide');if(role==='host')newGame();else{st.ph=0;dp.x=st.px;dp.y=st.py;dh.x=st.hx;dh.y=st.hy}}
+           else if(t==='failed'||t==='disconnected'){role='none';$('ov2').classList.add('hide');$('menu').classList.remove('hide');$('stat').textContent='اتصال برقرار نشد یا قطع شد: '+d}
+           else if(t==='msg')onMsg(d)};
+          function pick(r){role=r;mine=r==='guest'?{x:200,y:100}:{x:200,y:700}}
+          $('bh').onclick=function(){if(!window.Android){$('stat').textContent='برای اتصال بلوتوث باید داخل اپ اندروید باشی.';return}pick('host');$('stat').textContent='...';Android.host()};
+          $('bj').onclick=function(){if(!window.Android){$('stat').textContent='برای اتصال بلوتوث باید داخل اپ اندروید باشی.';return}pick('guest');$('stat').textContent='...';Android.join()};
+          $('bs').onclick=function(){pick('solo');$('menu').classList.add('hide');newGame()};
+          $('bt').onclick=function(){unlock();play(3);$('stat').textContent='وضعیت صدا: '+(AC?AC.state:'پشتیبانی نمی‌شه')+' (اگه صدایی نیومد، ولوم مدیا رو بالا ببر)'};
+          $('again').onclick=newGame;
+          $('home').onclick=function(){if(window.Android)Android.stop();location.reload()};
+          function circ(x,y,r,c){ctx.fillStyle=c;ctx.beginPath();ctx.arc(x,y,r,0,6.3);ctx.fill()}
+          function draw(){
+           ctx.setTransform(DPR,0,0,DPR,0,0);ctx.fillStyle='#0b1220';ctx.fillRect(0,0,W,H);
+           ctx.translate(OX,OY);ctx.scale(S,S);
+           if(role==='guest'){ctx.translate(LW,LH);ctx.rotate(Math.PI)}
+           ctx.fillStyle='#10233f';ctx.fillRect(0,0,LW,LH);
+           ctx.strokeStyle='#2c5a96';ctx.lineWidth=4;ctx.strokeRect(2,2,LW-4,LH-4);
+           ctx.beginPath();ctx.moveTo(0,LH/2);ctx.lineTo(LW,LH/2);ctx.stroke();
+           ctx.beginPath();ctx.arc(LW/2,LH/2,60,0,6.3);ctx.stroke();
+           ctx.fillStyle='#ff5a6e';ctx.fillRect((LW-GOAL)/2,0,GOAL,8);
+           ctx.fillStyle='#4aa3ff';ctx.fillRect((LW-GOAL)/2,LH-8,GOAL,8);
+           var g=role==='guest',px=g?dp.x:st.px,py=g?dp.y:st.py;
+           var hx=g?dh.x:st.hx,hy=g?dh.y:st.hy,gx=g?mine.x:st.gx,gy=g?mine.y:st.gy;
+           circ(hx,hy,PD,'#4aa3ff');circ(hx,hy,PD*.45,'#bfe0ff');
+           circ(gx,gy,PD,'#ff5a6e');circ(gx,gy,PD*.45,'#ffd0d6');
+           circ(px,py,PR,'#fff');
+           ctx.setTransform(DPR,0,0,DPR,0,0);ctx.textAlign='left';ctx.font='bold 40px system-ui';ctx.fillStyle='rgba(255,255,255,.35)';
+           var me=g?st.gs:st.hs,op=g?st.hs:st.gs;ctx.fillText(op,12,H/2-14);ctx.fillText(me,12,H/2+40);
+           if(st.ph===1&&role!=='none'){ctx.textAlign='center';ctx.font='bold 48px system-ui';ctx.fillStyle='#fff';ctx.fillText(st.cd>1?'آماده؟':'برو!',W/2,H/2)}
+           if(st.ph===3&&!over){over=true;play(me>op?4:5);$('res').textContent=me>op?'بردی!':'باختی';$('again').classList.toggle('hide',g);$('ov2').classList.remove('hide')}
+           else if(st.ph!==3&&over){over=false;$('ov2').classList.add('hide')}}
+          function loop(t){var dt=Math.min(.05,(t-last)/1000||0);last=t;
+           if(role==='host'||role==='solo'){hostUpdate(dt);
+            if(role==='host'&&t-lastSend>33){lastSend=t;send('s|'+[st.px,st.py,st.vx,st.vy,st.hx,st.hy,st.hs,st.gs,st.ph,st.cd*10,ev,evn].map(Math.round).join(','))}}
+           else if(role==='guest'){var age=Math.min(.1,(t-lastMsg)/1000),k=Math.min(1,dt*30);
+            dp.x+=(st.px+st.vx*age-dp.x)*k;dp.y+=(st.py+st.vy*age-dp.y)*k;dh.x+=(st.hx-dh.x)*k;dh.y+=(st.hy-dh.y)*k;
+            if(t-lastSend>33){lastSend=t;send('p|'+Math.round(mine.x)+','+Math.round(mine.y))}}
+           draw();requestAnimationFrame(loop)}
+          requestAnimationFrame(loop);
+          </script></body></html>
+          EOF_FILE
+      - name: Build
+        run: cd proj && gradle assembleDebug --no-daemon
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          files: proj/app/build/outputs/apk/debug/app-debug.apk
